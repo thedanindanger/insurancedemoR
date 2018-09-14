@@ -1,0 +1,501 @@
+---
+title: "insuranceDemo"
+author: "Daniel"
+date: "March 16, 2017"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r echo=FALSE}
+rstudioapi::getActiveDocumentContext()
+this.dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
+setwd(this.dir)
+
+#Suppressing Warning so they do not print when knitting
+#Do not not run when testing
+oldw <- getOption("warn")
+
+#UNCOMMENT ONLY WHEN KNITING
+options(warn = -1)
+
+#need to include at the bottom of script
+#options(warn = oldw)
+
+```
+
+```{r libraries, echo=FALSE}
+library(Matrix)
+library(glmnet)
+library(mlbench)
+library(caret)
+library(ggplot2)
+library(GGally)
+library(nnet)
+library(NeuralNetTools)
+library(dummies)
+
+```
+
+## Loading Data
+
+```{r data, echo=FALSE}
+
+data <- read.csv("./customer_claims_demo.csv")
+
+head(data)
+
+```
+
+## Data Exploration
+
+Summaries of Data
+
+###Total Claim Amount
+
+``` {r claim histogram, echo = FALSE}
+
+library(ggplot2)
+
+qplot(data$Total.Claim.Amount, geom = "histogram")
+
+
+```
+
+###Income
+
+``` {r Income historgram, echo=FALSE}
+
+
+qplot(data$Income, geom = "histogram")
+
+
+```
+
+Many Zero Valuse, presumably uemployed, use colors to confirm
+
+``` {r visuals, echo=FALSE}
+
+qplot(data$Income, geom = "histogram"
+      , fill = data$EmploymentStatus)
+
+
+```
+
+
+### Scatter Matrix
+
+Comapring pairwise distribution of all continuous values
+
+Monthly Premium, CLV, and Income show some correlation with Total Claim amount, however it looks like Employment Status remains a confounding factor
+
+```{r scatter matrix color, echo = TRUE, message = FALSE, warning= FALSE}
+
+library(GGally)
+
+numerics <- sapply(data, is.numeric) #Get numeric columns only
+
+dataCorrs <- data[,numerics] #Filter data to only numeric for correlations
+
+#Create new value 'EmploymentStatus' with all employed as 'Employed' otherwise unemployed
+dataCorrs$EmploymentStatus <- ifelse(data$EmploymentStatus == 'Employed', 'Employed', 'Unemployed')
+
+ggpairs(dataCorrs
+                , mapping = ggplot2::aes(color= EmploymentStatus)
+                , lower=list(combo=wrap("facethist",binwidth=10))
+                , upper=list(continuous=wrap("cor", size=2))
+        )
+
+
+
+
+
+```
+
+
+
+
+## Model Evaluation
+
+Using Caret to evaluate Ridge Lasso and Linear regression options
+
+```{r caret, message= = FALSE}
+
+dataFactors <- data.frame(Education = data$Education
+                          ,EmploymentStatus = data$EmploymentStatus
+                          ,Location.Code = data$Location.Code
+                          ,Policy.Type = data$Policy.Type
+                          ,Vehicle.Class = data$Vehicle.Class
+                          ,Vehicle.Size = data$Vehicle.Size)
+
+
+#adding to check distribution
+dataFactors$Total.Claim.Amount <- data$Total.Claim.Amount
+
+
+#sample data set
+
+dataNumeric$EmploymentStatus <- NULL
+dataNumeric$Total.Claim.Amount <- NULL
+
+dataset <- data.frame(dataFactors, dataNumeric )
+
+
+cv.train <- createDataPartition(dataset$Total.Claim.Amount, p = 0.5, list = FALSE)
+
+dataset.train <- dataset[cv.train, ]
+dataset.test <- dataset[-cv.train, ]
+
+
+#Build Formula
+
+names <- names(dataset)
+y <- "Total.Claim.Amount"
+x <- names[!names %in% y]
+form <- as.formula(paste(y, " ~ ",paste(x,collapse="+")))
+
+glm_results <- NULL
+
+glm_results <- caret::train(form,
+                               data = dataset.train,
+                               method = "glmnet",
+                               metric = "Rsquared",
+                               tuneGrid = expand.grid(alpha=c(0,0.01,0.05,0.99,1),lambda = c(0,0.01)), 
+                               trControl = trainControl(method="cv"),
+                               preProcess = c("center", "scale"),
+                               na.action=na.omit
+)
+
+
+```
+
+```{r plotting results 1}
+plot(glm_results)
+```
+
+```{r plotting results 2}
+
+#Get coef names
+vnat=coef(glm_results$finalModel)
+vnat=vnat[-1,ncol(vnat)] # remove the intercept, and get the coefficients at the end of the path
+vn = names(vnat)
+
+plot(glm_results$finalModel, xvar="lambda", label = TRUE)
+axis(4, at=vnat,line=-.5,label=vn,las=1,tick=FALSE, cex.axis=0.5) 
+```
+
+```{r plotting results 3}
+plot(glm_results$finalModel, xvar="dev", label= TRUE)
+axis(4, at=vnat,line=-.5,label=vn,las=1,tick=FALSE, cex.axis=0.5) 
+```
+
+```{r plotting results 4}
+glm_test.lmin <- predict(glm_results, dataset.test, s="lambda.min", type = "raw")
+
+head(glm_test.lmin)
+smoothScatter(glm_test.lmin, dataset.test$Total.Claim.Amount)
+```
+
+
+
+Using base glmnet package now that we've seen Alpha = 1 is optimal
+
+
+```{r glmnet cv}
+
+y.cv <- data[,names(data) %in% y]
+
+x.cv <- as.matrix(dataNumeric[,!names(dataNumeric) %in% y])
+
+glm_cv <- cv.glmnet(x = x.cv,y = y.cv)
+
+plot(glm_cv)
+
+coef(glm_cv, s="lambda.min")
+
+
+coef(glm_cv, s="lambda.1se")
+
+```
+
+```{r glmnet cv 2}
+
+data.oh <- data
+
+data.oh$Customer <- NULL
+
+names.all <- names(data.oh)
+
+names.factors <- names.all[!names.all %in% names(dataNumeric)]
+
+names.factors <- names.factors[names.factors!=y]
+
+names.factors <- names.factors[names.factors!="Effective.To.Date"]
+
+data.ohc <- dummy.data.frame(data.oh, names=names.factors, sep=".")
+
+y.cvoh <- data.ohc[,names(data.ohc) %in% y]
+
+x.cvoh <- data.ohc[,!names(data.ohc) %in% y]
+
+x.cvoh <- as.matrix((sapply(x.cv,as.numeric)))
+
+glm_cvoh <- cv.glmnet(x = x.cvoh,y = y.cvoh)
+
+plot(glm_cvoh)
+
+coef(glm_cvoh, s="lambda.min")
+
+```
+
+
+#Tree diagram
+
+A regression or decision tree shows a heirarchy of factors influencing some outcome.
+
+Numeric values are split (high/low) at the point creating the greatest impact on outcome value.
+
+Multiple factors are evaluated as one vs any other a.k.a. 'one-hot' or 'dummy values'
+
+```{r}
+
+library(rpart)
+library(rpart.plot)
+
+head(data)
+
+tree = rpart(Total.Claim.Amount ~ Vehicle.Size + Policy.Type + Months.Since.Last.Claim + Marital.Status + Income + EmploymentStatus
+             , method = "anova"
+             , data = data)
+
+rpart.plot(tree)
+
+
+```
+
+Trees give us a nice view of what influences our outcome
+
+We can get a high level view of our data quickly...
+
+```{r tree plot full}
+
+library(rpart)
+library(rpart.plot)
+
+treeFormula = as.formula(
+  "Total.Claim.Amount ~  Coverage + Education + EmploymentStatus 
+  + Gender + Income + Location.Code + Marital.Status + Vehicle.Size"
+  )
+
+treeAll = rpart(treeFormula
+             , method = "anova"
+             , data = data)
+
+rpart.plot(treeAll)
+
+
+```
+
+Then do some more exploratory analysis to get a better picture
+
+```{r tree validation}
+
+library(ggplot2)
+
+ggplot(data, aes(x=Total.Claim.Amount, fill=Location.Code)) 
+  + geom_density(alpha = .5)
+
+ggplot(data, aes(x=Total.Claim.Amount, fill=Coverage)) 
+  + geom_density(alpha = .5)
+
+
+```
+
+```{r normalizing}
+
+data$Claim.To.Premium = data$Total.Claim.Amount / data$Monthly.Premium.Auto
+
+ggplot(data, aes(x=Claim.To.Premium, fill=Location.Code)) 
+  + geom_density(alpha = .5)
+
+ggplot(data, aes(x=Claim.To.Premium, fill=Coverage)) 
+  + geom_density(alpha = .5)
+
+ggplot(data, aes(x=Claim.To.Premium, fill=Marital.Status)) + geom_density(alpha = .5)
+
+ggplot(data, aes(x=Claim.To.Premium, fill=Income.Over.5137)) + geom_density(alpha = .5)
+       
+
+```
+
+```{r tree normalized}
+
+treeNorm = rpart( 
+             , method = "anova"
+             , data = data)
+
+rpart.plot(treeNorm)
+
+```
+
+
+```{r Marital Status}
+
+
+ggplot(data, aes(x=Claim.To.Premium, fill=Marital.Status)) + geom_density(alpha = .5)
+
+data$Income.Over.5137 = ifelse(data$Income > 5137, TRUE, FALSE)
+
+ggplot(data, aes(x=Claim.To.Premium, fill=Income.Over.5137)) + geom_density(alpha = .5)
+
+# Getting fancy
+
+library(dplyr)
+
+data = data %>% 
+  mutate(
+    Location.Number = case_when(
+    Location.Code == "Rural" ~ 0,
+    Location.Code == "Suburban" ~ 1,
+    Location.Code == "Urban" ~ 2,
+    TRUE ~ 4
+  )
+)
+
+head(data)
+
+library(plotly)
+
+pData = data[data$Income > 0,]
+
+p = plot_ly(pData, x = ~Income, y = ~Claim.To.Premium, z = ~Monthly.Premium.Auto, color = ~Location.Code) %>% add_markers()
+
+p
+
+library(reshape2)
+
+mData = (data[, names(data) %in% c("Location.Number", "Total.Claim.Amount", "Income")])
+
+mData = melt(mData, id.vars = c("Location.Number", "Income"), measure.vars ="Total.Claim.Amount")
+
+mData$variable = NULL
+
+
+head(mData)
+
+summary(mData)
+
+
+ggplot(mData, aes(z = Location.Number, y = Income, x = value)) + stat_contour()
+
+
+
+```
+#Build NNET Formula
+
+```{r nn, message=FALSE}
+
+names <- names(dataNumeric)
+y_nn <- "Total.Claim.Amount"
+x_nn <- names[!names %in% y]
+form_nn <- as.formula(paste(y_nn, " ~ ",paste(x_nn,collapse="+")))
+
+nn1_grid <- expand.grid(decay = c(0.01, .1), size = c(3, 5))
+
+nn1_preProc <- c("center","scale")
+
+
+nn1 <- NULL
+
+nn1 <- train(form_nn, 
+             data=dataset.train, 
+             method="nnet", 
+             linout=TRUE, 
+             tuneGrid = nn1_grid, 
+             preProcess = nn1_preProc,
+             maxit = 100,
+             metric = "Rsquared",
+             maximize = TRUE)
+
+
+plot(nn1)
+
+plotnet(nn1$finalModel)
+
+lekprofile(nn1, xsel = c('Customer.Lifetime.Value', 'Income'), group_vals = seq(0,1,by=0.05))
+
+
+```
+
+#Additional Testing with Earth
+
+Just for visualizations
+
+```{r caret earth, message= = FALSE}
+
+#sample data set
+
+library(earth)
+library(caret)
+
+numerics <- sapply(data, is.numeric)
+
+dataNumeric <- data[,numerics]
+
+dataNumeric$EmploymentStatus <- ifelse(data$EmploymentStatus == 'Employed', 'Employed', 'Unemployed')
+
+
+dataFactors <- data.frame(Education = data$Education
+                          ,EmploymentStatus = data$EmploymentStatus
+                          ,Location.Code = data$Location.Code
+                          ,Policy.Type = data$Policy.Type
+                          ,Vehicle.Class = data$Vehicle.Class
+                          ,Vehicle.Size = data$Vehicle.Size)
+
+
+dataNumeric$EmploymentStatus <- NULL
+dataNumeric$Total.Claim.Amount <- NULL
+
+dataFactors$Total.Claim.Amount <- data$Total.Claim.Amount
+
+dataset <- data.frame(dataFactors, dataNumeric )
+
+
+cv.train <- createDataPartition(dataset$Total.Claim.Amount, p = 0.5, list = FALSE)
+
+dataset.train <- dataset[cv.train, ]
+dataset.test <- dataset[-cv.train, ]
+
+
+#Build Formula
+
+names <- names(dataset)
+y <- "Total.Claim.Amount"
+x <- names[!names %in% y]
+form <- as.formula(paste(y, " ~ ",paste(x,collapse="+")))
+
+form2 <- as.formula("Claim.To.Premium ~ Customer.Lifetime.Value + Coverage + Education + EmploymentStatus + Gender + Income + Location.Code + Marital.Status + Vehicle.Size")
+
+earth_results <- NULL
+
+earth_results <- earth(form2,
+                       data = data,
+                       degree = 2,
+                       nprune = 5
+                      
+)
+
+
+```
+
+#plotting earth
+
+```{r caret earth visuals, message = FALSE}
+
+plotmo(earth_results)
+
+#head(dataset)
+
+
+```
